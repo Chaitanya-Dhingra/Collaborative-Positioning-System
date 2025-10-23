@@ -23,6 +23,7 @@ import android.widget.ScrollView;
 import android.widget.Toast;
 import android.view.View;
 import android.content.Context;
+import android.util.Log;
 
 import com.example.collaborativepositioning.model.GnssDataPacket;
 import com.example.collaborativepositioning.network.DeviceManager;
@@ -37,6 +38,7 @@ import java.util.List;
 public class MainActivity extends AppCompatActivity
         implements WiFiDirectManager.WiFiDirectListener, DeviceManager.DeviceUpdateListener {
 
+    private static final String TAG = "MainActivity";
     private static final int PERMISSION_REQUEST_CODE = 1;
     private static final int DATA_SHARE_INTERVAL_MS = 1000; // Share data every 1 second
 
@@ -59,6 +61,8 @@ public class MainActivity extends AppCompatActivity
     private Runnable dataShareRunnable;
 
     private boolean isNetworkingEnabled = false;
+    private boolean hasLocation = false;
+    private boolean hasGnssData = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -80,6 +84,7 @@ public class MainActivity extends AppCompatActivity
 
         // Generate unique device ID
         myDeviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+        Log.d(TAG, "My Device ID: " + myDeviceId);
 
         // Initialize Phase 2 components
         deviceManager = new DeviceManager(this);
@@ -91,7 +96,12 @@ public class MainActivity extends AppCompatActivity
             @Override
             public void run() {
                 if (isNetworkingEnabled && currentPacket != null) {
+                    // Update my device in DeviceManager
+                    deviceManager.updateDevice(currentPacket);
+                    // Send to network
                     wifiDirectManager.sendData(currentPacket);
+                    Log.d(TAG, "Shared data - Lat: " + currentPacket.getLatitude() +
+                            ", Satellites: " + currentPacket.getMeasurements().size());
                 }
                 dataShareHandler.postDelayed(this, DATA_SHARE_INTERVAL_MS);
             }
@@ -125,6 +135,10 @@ public class MainActivity extends AppCompatActivity
         // Discover Peers button
         discoverButton.setOnClickListener(v -> {
             if (!isNetworkingEnabled) {
+                if (!hasLocation || !hasGnssData) {
+                    Toast.makeText(this, "Waiting for GPS fix...", Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 enableNetworking();
             }
             wifiDirectManager.discoverPeers();
@@ -203,6 +217,7 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void updateLocationData(Location location) {
+        hasLocation = true;
         latestLatLon = "Latitude: " + location.getLatitude() +
                 "\nLongitude: " + location.getLongitude();
 
@@ -217,6 +232,13 @@ public class MainActivity extends AppCompatActivity
         currentPacket.setAltitude(location.getAltitude());
         currentPacket.setAccuracy(location.getAccuracy());
 
+        Log.d(TAG, "Location updated: " + location.getLatitude() + ", " + location.getLongitude());
+
+        // Update my device in DeviceManager immediately
+        if (isNetworkingEnabled) {
+            deviceManager.updateDevice(currentPacket);
+        }
+
         updateDisplay();
     }
 
@@ -227,12 +249,14 @@ public class MainActivity extends AppCompatActivity
         locationManager.registerGnssMeasurementsCallback(new GnssMeasurementsEvent.Callback() {
             @Override
             public void onGnssMeasurementsReceived(GnssMeasurementsEvent eventArgs) {
+                hasGnssData = true;
                 StringBuilder sb = new StringBuilder();
                 sb.append("SatID, CarrierFreq(Hz), PseudoRangeRate(m/s), CN0(dB-Hz)\n");
 
                 // Clear previous measurements
                 if (currentPacket == null) {
                     currentPacket = new GnssDataPacket();
+                    currentPacket.setDeviceId(myDeviceId);
                 }
                 currentPacket.getMeasurements().clear();
 
@@ -255,6 +279,15 @@ public class MainActivity extends AppCompatActivity
                 }
 
                 latestGnssData = sb.toString();
+
+                // Update timestamp
+                currentPacket.setTimestamp(System.currentTimeMillis());
+
+                // Update my device in DeviceManager
+                if (isNetworkingEnabled) {
+                    deviceManager.updateDevice(currentPacket);
+                }
+
                 runOnUiThread(() -> updateDisplay());
             }
         });
@@ -265,16 +298,25 @@ public class MainActivity extends AppCompatActivity
     private void updateDisplay() {
         StringBuilder display = new StringBuilder();
         display.append("=== MY DEVICE ===\n");
+        display.append("ID: ").append(myDeviceId.substring(0, Math.min(8, myDeviceId.length()))).append("\n");
         display.append(latestLatLon).append("\n\n");
         display.append(latestGnssData).append("\n");
 
         if (isNetworkingEnabled) {
-            display.append("\n=== NEARBY DEVICES ===\n");
-            display.append(deviceManager.getDevicesSummary());
+            int deviceCount = deviceManager.getActiveDeviceCount();
+            display.append("\n=== NEARBY DEVICES (").append(deviceCount).append(") ===\n");
 
-            if (deviceManager.getActiveDeviceCount() > 0) {
+            if (deviceCount == 0) {
+                display.append("No other devices connected yet.\n");
+                display.append("Make sure other devices are running and have pressed 'Discover'.\n");
+            } else {
+                display.append(deviceManager.getDevicesSummary());
+
                 display.append("\n=== PROXIMITY ANALYSIS ===\n");
-                display.append(deviceManager.getProximityAnalysis(myDeviceId));
+                String proximityData = deviceManager.getProximityAnalysis(myDeviceId);
+                display.append(proximityData);
+
+                Log.d(TAG, "Proximity Analysis:\n" + proximityData);
             }
         }
 
@@ -309,18 +351,25 @@ public class MainActivity extends AppCompatActivity
             disconnectButton.setVisibility(View.VISIBLE);
 
             Toast.makeText(this, "Connected! Role: " + role, Toast.LENGTH_SHORT).show();
+            Log.d(TAG, "Connected as: " + role);
         });
     }
 
     @Override
     public void onDataReceived(GnssDataPacket packet) {
+        Log.d(TAG, "Data received from device: " + packet.getDeviceId().substring(0, 8) +
+                " Lat: " + packet.getLatitude() + ", Satellites: " + packet.getMeasurements().size());
+
         deviceManager.updateDevice(packet);
         runOnUiThread(() -> updateDisplay());
     }
 
     @Override
     public void onStatusChanged(String status) {
-        runOnUiThread(() -> statusText.setText("Status: " + status));
+        runOnUiThread(() -> {
+            statusText.setText("Status: " + status);
+            Log.d(TAG, "Status: " + status);
+        });
     }
 
     // DeviceUpdateListener implementation
@@ -328,6 +377,7 @@ public class MainActivity extends AppCompatActivity
     public void onDeviceAdded(String deviceId) {
         runOnUiThread(() -> {
             Toast.makeText(this, "New device connected!", Toast.LENGTH_SHORT).show();
+            Log.d(TAG, "Device added: " + deviceId.substring(0, 8));
             updateDisplay();
         });
     }
@@ -341,6 +391,7 @@ public class MainActivity extends AppCompatActivity
     public void onDeviceRemoved(String deviceId) {
         runOnUiThread(() -> {
             Toast.makeText(this, "Device disconnected", Toast.LENGTH_SHORT).show();
+            Log.d(TAG, "Device removed: " + deviceId.substring(0, 8));
             updateDisplay();
         });
     }
@@ -348,6 +399,13 @@ public class MainActivity extends AppCompatActivity
     private void enableNetworking() {
         isNetworkingEnabled = true;
         wifiDirectManager.register();
+
+        // Add my device to DeviceManager first
+        if (currentPacket != null) {
+            deviceManager.updateDevice(currentPacket);
+            Log.d(TAG, "Added my device to DeviceManager");
+        }
+
         dataShareHandler.post(dataShareRunnable);
 
         // Start timeout checker
@@ -361,6 +419,9 @@ public class MainActivity extends AppCompatActivity
                 }
             }
         }, 5000);
+
+        statusText.setText("Status: Networking Enabled");
+        updateDisplay();
     }
 
     private void disableNetworking() {

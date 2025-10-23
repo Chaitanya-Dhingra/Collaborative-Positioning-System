@@ -237,31 +237,78 @@ public class DeviceManager {
     public String getProximityAnalysis(String referenceDeviceId) {
         DeviceInfo reference = devices.get(referenceDeviceId);
         if (reference == null || reference.getLatestPacket() == null) {
-            return "No data for reference device";
+            return "No data for reference device\n";
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("Proximity Analysis:\n\n");
 
-        for (DeviceInfo other : getActiveDevices()) {
-            if (!other.getDeviceId().equals(referenceDeviceId)) {
-                double distance = reference.getDistanceTo(other);
-                double relVel = reference.getRelativeVelocity(other);
-
-                sb.append(String.format("Device: %s\n",
-                        other.getDeviceId().substring(0, Math.min(8, other.getDeviceId().length()))));
-                sb.append(String.format("Distance: %.2f m\n", distance));
-                sb.append(String.format("Rel. Velocity: %.2f m/s\n", relVel));
-
-                // Simple collision warning
-                if (distance > 0 && distance < 50 && relVel < -2) {
-                    sb.append("⚠️ WARNING: Approaching!\n");
-                } else if (distance > 0 && distance < 20) {
-                    sb.append("⚠️ CAUTION: Close proximity\n");
-                }
-
-                sb.append("\n");
+        List<DeviceInfo> otherDevices = new ArrayList<>();
+        for (DeviceInfo info : getActiveDevices()) {
+            if (!info.getDeviceId().equals(referenceDeviceId) &&
+                    info.getLatestPacket() != null) {
+                otherDevices.add(info);
             }
+        }
+
+        if (otherDevices.isEmpty()) {
+            sb.append("No other devices to analyze.\n");
+            sb.append("Waiting for other devices to share their location...\n");
+            return sb.toString();
+        }
+
+        for (DeviceInfo other : otherDevices) {
+            double distance = reference.getDistanceTo(other);
+            double relVel = reference.getRelativeVelocity(other);
+
+            sb.append(String.format("Device: %s\n",
+                    other.getDeviceId().substring(0, Math.min(8, other.getDeviceId().length()))));
+
+            if (distance >= 0) {
+                sb.append(String.format("Distance: %.2f m\n", distance));
+
+                // More detailed distance categories
+                if (distance < 5) {
+                    sb.append("🔴 VERY CLOSE - Immediate proximity\n");
+                } else if (distance < 20) {
+                    sb.append("🟡 CAUTION - Close proximity\n");
+                } else if (distance < 50) {
+                    sb.append("🟢 NEAR - Within detection range\n");
+                } else if (distance < 100) {
+                    sb.append("🔵 FAR - Outside immediate range\n");
+                } else {
+                    sb.append("⚪ VERY FAR - Distant\n");
+                }
+            } else {
+                sb.append("Distance: Unable to calculate\n");
+            }
+
+            sb.append(String.format("Rel. Velocity: %.2f m/s", relVel));
+
+            if (Math.abs(relVel) > 0.5) {
+                if (relVel < 0) {
+                    sb.append(" (APPROACHING)");
+                } else {
+                    sb.append(" (RECEDING)");
+                }
+            }
+            sb.append("\n");
+
+            // Collision warning logic
+            if (distance > 0 && distance < 50 && relVel < -2) {
+                sb.append("⚠️ WARNING: Rapidly approaching!\n");
+            } else if (distance > 0 && distance < 20 && relVel < -0.5) {
+                sb.append("⚠️ CAUTION: Approaching slowly\n");
+            }
+
+            // Time to collision estimate
+            if (distance > 0 && relVel < -0.1) {
+                double timeToCollision = distance / Math.abs(relVel);
+                if (timeToCollision < 30) {
+                    sb.append(String.format("⏱️ Est. time to collision: %.1f seconds\n", timeToCollision));
+                }
+            }
+
+            sb.append("\n");
         }
 
         return sb.toString();
